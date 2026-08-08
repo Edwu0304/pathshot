@@ -1,6 +1,0 @@
-Redesign preview toolbar: Microsoft YaHei UI font, color palette expansion,
-left-right action layout with clipboard mode selector (path/image),
-default zoom 140%, and fix annotated image saving after window destroy.
-
-Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
-EOF
