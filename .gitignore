@@ -1,0 +1,21 @@
+# 截圖輸出（不進 repo）
+Source/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 打包產物
+build/
+*.spec
+
+# 執行檔（改用 Release 發布）
+dist/
+
+# 設定檔（含本機路徑）
+screenshot_config.json
+
+# OS
+.DS_Store
+Thumbs.db
