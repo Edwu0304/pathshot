@@ -70,12 +70,12 @@ class RegionSelector:
             text="拖曳選取區域（Esc 取消）",
             anchor="w",
             fill="white",
-            font=("Arial", 16),
+            font=("Microsoft YaHei UI", 16),
         )
 
         # 尺寸標籤（拖曳時顯示寬×高，黑底白字）
         self.size_text = self.canvas.create_text(
-            12, 60, text="", anchor="w", fill="white", font=("Arial", 14)
+            12, 60, text="", anchor="w", fill="white", font=("Microsoft YaHei UI", 14)
         )
         self.size_bg = None
 
@@ -143,41 +143,126 @@ def capture_region_image(region: tuple[int, int, int, int]):
 
 
 class PreviewWindow:
-    """截圖預覽視窗：顯示截圖，提供「確認儲存」與「重截」按鈕。"""
+    """截圖預覽視窗：Canvas 顯示 + 註記工具（原子筆/螢光筆/直線/方框）。"""
+
+    TOOL_PEN = "pen"
+    TOOL_HIGHLIGHT = "highlight"
+    TOOL_LINE = "line"
+    TOOL_RECT = "rect"
+
+    PEN_COLORS = ["#ff0000", "#0000ff", "#000000", "#ffff00", "#ffffff"]  # 紅/藍/黑/黃/白
+    HL_COLORS = ["#ffff00", "#00ff00"]  # 黃/綠
 
     def __init__(self, master: tk.Tk, image, region: tuple[int, int, int, int]) -> None:
         self.master = master
         self.image = image
         self.region = region
-        self.choice: str | None = None  # "save" / "retake"
+        self.choice: str | None = None  # "save" / "retake" / "cancel"
+        self.zoom = 1.4  # 縮放係數（1.0 = 原始適配）
 
-        self.win = tk.Toplevel(master)
+        self._build_window()
+
+        self.win.grab_set()
+
+    def _build_window(self) -> None:
+        """建立預覽視窗（依目前 zoom 重建）。"""
+        self.win = tk.Toplevel(self.master)
         self.win.title("截圖預覽")
         self.win.attributes("-topmost", True)
-        self.win.resizable(False, False)
 
-        # 縮放顯示（限制最大 900x600）
-        max_w, max_h = 900, 600
-        img_w, img_h = image.size
-        scale = min(1.0, max_w / img_w, max_h / img_h)
-        display_size = (int(img_w * scale), int(img_h * scale))
+        # 縮放顯示（zoom 倍率，限制最大 1000x650 * zoom）
+        img_w, img_h = self.image.size
+        base_scale = min(1.0, 1000 / img_w, 650 / img_h)
+        self.scale = base_scale * self.zoom
+        self.disp_w = max(1, int(img_w * self.scale))
+        self.disp_h = max(1, int(img_h * self.scale))
 
         from PIL import ImageTk
 
-        self.photo = ImageTk.PhotoImage(image.resize(display_size))
-        img_label = tk.Label(self.win, image=self.photo)
-        img_label.pack(padx=8, pady=8)
+        self.photo = ImageTk.PhotoImage(self.image.resize((self.disp_w, self.disp_h)))
+
+        # 工具狀態
+        self.tool = self.TOOL_PEN
+        self.pen_color = self.PEN_COLORS[0]
+        self.hl_color = self.HL_COLORS[0]
+        self.draw_items: list[int] = []  # 目前一筆註記的 item
+        self.all_annotations: list[tuple[list[int], list[tuple]]] = []  # (item_ids, ann_data) 供合成與復原
+        self.start_x = 0
+        self.start_y = 0
+
+        # 工具列
+        self._build_toolbar()
+
+        # Canvas 疊圖
+        self.canvas = tk.Canvas(self.win, width=self.disp_w, height=self.disp_h, highlightthickness=0)
+        self.canvas.pack(padx=8, pady=(8, 0))
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+
+        # 綁定繪圖事件
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
 
         # 尺寸資訊
-        info = tk.Label(self.win, text=f"{img_w} × {img_h} 像素", font=("Arial", 10))
-        info.pack()
+        info = tk.Label(self.win, text=f"{img_w} × {img_h} 像素", font=("Microsoft YaHei UI", int(10 * self.zoom)))
+        info.pack(pady=(4, 0))
 
-        # 按鈕列
-        btn_frame = tk.Frame(self.win)
-        btn_frame.pack(pady=8)
-        tk.Button(btn_frame, text="✓ 確認儲存", font=("Arial", 12), command=self._save).pack(side="left", padx=6)
-        tk.Button(btn_frame, text="↻ 重截", font=("Arial", 12), command=self._retake).pack(side="left", padx=6)
-        tk.Button(btn_frame, text="✕ 取消", font=("Arial", 12), command=self._cancel).pack(side="left", padx=6)
+        # 操作列 — 左邊主要動作，右邊剪貼簿說明
+        bfont = ("Microsoft YaHei UI", int(13 * self.zoom))
+        fs_small = ("Microsoft YaHei UI", int(10 * self.zoom))
+
+        action_row = tk.Frame(self.win)
+        action_row.pack(pady=14, padx=8, fill="x")
+
+        # --- 主要動作 (左側) ---
+        btn_group = tk.LabelFrame(action_row, text="操作", font=("Microsoft YaHei UI", int(11 * self.zoom)), padx=12, pady=8)
+        btn_group.pack(side="left")
+
+        save_btn = tk.Button(
+            btn_group, text="✓ 確認儲存",
+            font=(bfont[0], bfont[1], "bold"),
+            command=self._save, padx=16, pady=5,
+            bg="#2563eb", fg="white",
+            activebackground="#1d4ed8", activeforeground="white",
+        )
+        save_btn.pack(side="left", padx=8)
+
+        retake_btn = tk.Button(
+            btn_group, text="↻ 重截", font=bfont,
+            command=self._retake, padx=16, pady=5,
+            activebackground="#e0e0e0",
+        )
+        retake_btn.pack(side="left", padx=8)
+
+        cancel_btn = tk.Button(
+            btn_group, text="✕ 取消", font=bfont,
+            command=self._cancel, padx=16, pady=5,
+            activebackground="#fee2e2", activeforeground="#991b1b",
+        )
+        cancel_btn.pack(side="left", padx=8)
+
+        # --- 剪貼簿選項 (右側) ---
+        clipboard_frame = tk.Frame(action_row)
+        clipboard_frame.pack(side="right", fill="x", expand=True)
+
+        tk.Label(
+            clipboard_frame,
+            text="儲存後複製到剪貼簿：",
+            font=fs_small, fg="#475569",
+        ).pack(anchor="e")
+
+        # 二選一：路徑 / 圖片
+        self.clipboard_mode = tk.StringVar(value="path")
+        mode_frame = tk.Frame(clipboard_frame)
+        mode_frame.pack(anchor="e", pady=(2, 0))
+        tk.Radiobutton(
+            mode_frame, text="📄 路徑", variable=self.clipboard_mode, value="path",
+            font=fs_small, activebackground="#f1f5f9",
+        ).pack(side="left", padx=4)
+        tk.Radiobutton(
+            mode_frame, text="🖼️ 圖片", variable=self.clipboard_mode, value="image",
+            font=fs_small, activebackground="#f1f5f9",
+        ).pack(side="left", padx=4)
 
         # 置中
         self.win.update_idletasks()
@@ -186,7 +271,227 @@ class PreviewWindow:
         y = (self.win.winfo_screenheight() - h) // 2
         self.win.geometry(f"+{x}+{y}")
 
-        self.win.grab_set()  # 強制焦點
+    def _rebuild(self) -> None:
+        """依目前 zoom 重建預覽視窗。"""
+        # 若已有視窗，先銷毀
+        if hasattr(self, "win") and self.win.winfo_exists():
+            self.win.destroy()
+        self._build_window()
+
+    def _zoom_in(self) -> None:
+        if self.zoom < 2.0:
+            self.zoom = round(min(2.0, self.zoom + 0.25), 2)
+            self._rebuild()
+
+    def _zoom_out(self) -> None:
+        if self.zoom > 1.0:
+            self.zoom = round(max(1.0, self.zoom - 0.25), 2)
+            self._rebuild()
+
+    def _build_toolbar(self) -> None:
+        """建立工具列：工具選擇、顏色選擇、註記動作、縮放控制。"""
+        bar = tk.Frame(self.win, relief="sunken", bd=1)
+        bar.pack(pady=(6, 6), padx=8, fill="x")
+
+        fs = int(11 * self.zoom)
+        fs_btn = ("Microsoft YaHei UI", fs)
+
+        # --- 工具群組 (button-group style) ---
+        tools_frame = tk.LabelFrame(bar, text="工具", font=fs_btn, padx=6, pady=4)
+        tools_frame.pack(side="left", padx=(4, 2))
+
+        self.tool_var = tk.StringVar(value=self.tool)
+        self.tool_buttons: dict[str, tk.Radiobutton] = {}
+        tools = [
+            ("✏️ 原子筆", self.TOOL_PEN),
+            ("🖍️ 螢光筆", self.TOOL_HIGHLIGHT),
+            ("📏 直線", self.TOOL_LINE),
+            ("▭ 方框", self.TOOL_RECT),
+        ]
+        for text, tool in tools:
+            btn = tk.Radiobutton(
+                tools_frame, text=text, value=tool, variable=self.tool_var,
+                command=self._on_tool_change,
+                font=fs_btn,
+                indicatoron=False,
+                relief="raised", bd=2,
+                padx=10, pady=3,
+            )
+            btn.pack(side="left", padx=2, pady=1)
+            self.tool_buttons[tool] = btn
+        self._update_tool_buttons()
+
+        # --- 顏色群組 ---
+        color_frame = tk.LabelFrame(bar, text="顏色", font=fs_btn, padx=6, pady=4)
+        color_frame.pack(side="left", padx=(2, 2))
+
+        self.color_buttons: dict[str, tk.Button] = {}
+        for color in self.PEN_COLORS:
+            btn = tk.Button(
+                color_frame, bg=color, fg=color,
+                width=3, height=1,
+                command=lambda c=color: self._set_pen_color(c),
+                relief="raised", bd=2,
+                highlightthickness=1, highlightbackground="#888888",
+            )
+            btn.pack(side="left", padx=2, pady=1)
+            self.color_buttons[color] = btn
+        self._update_color_buttons()
+
+        # --- 註記動作 ---
+        actions_frame = tk.LabelFrame(bar, text="註記", font=fs_btn, padx=6, pady=4)
+        actions_frame.pack(side="left", padx=(2, 2))
+
+        tk.Button(actions_frame, text="↩️ 復原", font=fs_btn,
+                  command=self._undo, padx=8, pady=2,
+                  activebackground="#e0e0e0").pack(side="left", padx=2)
+        tk.Button(actions_frame, text="🧹 清除", font=fs_btn,
+                  command=self._clear, padx=8, pady=2,
+                  activebackground="#e0e0e0").pack(side="left", padx=2)
+
+        # --- 縮放控制 (靠右) ---
+        zoom_frame = tk.LabelFrame(bar, text="縮放", font=fs_btn, padx=6, pady=4)
+        zoom_frame.pack(side="right", padx=(2, 4))
+
+        tk.Button(zoom_frame, text="🔍 −", font=("Microsoft YaHei UI", int(13 * self.zoom)),
+                  command=self._zoom_out, padx=10, pady=2,
+                  activebackground="#e0e0e0").pack(side="left", padx=2)
+        self.zoom_label = tk.Label(zoom_frame, text=f"{int(self.zoom * 100)}%",
+                                   font=fs_btn)
+        self.zoom_label.pack(side="left", padx=4)
+        tk.Button(zoom_frame, text="🔍 +", font=("Microsoft YaHei UI", int(13 * self.zoom)),
+                  command=self._zoom_in, padx=10, pady=2,
+                  activebackground="#e0e0e0").pack(side="left", padx=2)
+
+    def _update_tool_buttons(self) -> None:
+        """更新工具按鈕的選中狀態顯示。"""
+        fs = int(11 * self.zoom)
+        for tool, btn in self.tool_buttons.items():
+            if tool == self.tool:
+                btn.configure(relief="sunken", font=("Microsoft YaHei UI", fs, "bold"))
+            else:
+                btn.configure(relief="raised", font=("Microsoft YaHei UI", fs))
+
+    def _update_color_buttons(self) -> None:
+        """更新顏色按鈕的選中狀態顯示。"""
+        for color, btn in self.color_buttons.items():
+            if color == self.pen_color:
+                btn.configure(bd=3, relief="sunken", highlightthickness=2, highlightbackground="#0066cc")
+            else:
+                btn.configure(bd=2, relief="raised", highlightthickness=1, highlightbackground="#888888")
+
+    def _on_tool_change(self) -> None:
+        self.tool = self.tool_var.get()
+        self._update_tool_buttons()
+
+    def _set_pen_color(self, color: str) -> None:
+        self.pen_color = color
+        self._update_color_buttons()
+
+    def _on_press(self, event) -> None:
+        self.start_x = event.x
+        self.start_y = event.y
+        self.draw_items = []
+        if self.tool in (self.TOOL_PEN, self.TOOL_HIGHLIGHT):
+            color = self.pen_color if self.tool == self.TOOL_PEN else self.hl_color
+            width = 2 if self.tool == self.TOOL_PEN else 12
+            # 螢光筆半透明（stipple 點狀）
+            item = self.canvas.create_line(
+                event.x, event.y, event.x + 1, event.y + 1,
+                fill=color, width=width,
+                stipple="gray50" if self.tool == self.TOOL_HIGHLIGHT else "",
+                capstyle="round", smooth=True,
+            )
+            self.draw_items.append(item)
+
+    def _on_drag(self, event) -> None:
+        if self.tool in (self.TOOL_PEN, self.TOOL_HIGHLIGHT):
+            if self.draw_items:
+                self.canvas.coords(self.draw_items[0], *self._append_point(event))
+        elif self.tool == self.TOOL_LINE:
+            self._draw_preview_line(event)
+        elif self.tool == self.TOOL_RECT:
+            self._draw_preview_rect(event)
+
+    def _append_point(self, event) -> list:
+        coords = list(self.canvas.coords(self.draw_items[0]))
+        coords.extend([event.x, event.y])
+        return coords
+
+    def _draw_preview_line(self, event) -> None:
+        if not self.draw_items:
+            item = self.canvas.create_line(
+                self.start_x, self.start_y, event.x, event.y,
+                fill=self.pen_color, width=2,
+            )
+            self.draw_items.append(item)
+        else:
+            self.canvas.coords(self.draw_items[0], self.start_x, self.start_y, event.x, event.y)
+
+    def _draw_preview_rect(self, event) -> None:
+        if not self.draw_items:
+            item = self.canvas.create_rectangle(
+                self.start_x, self.start_y, event.x, event.y,
+                outline=self.pen_color, width=2,
+            )
+            self.draw_items.append(item)
+        else:
+            self.canvas.coords(self.draw_items[0], self.start_x, self.start_y, event.x, event.y)
+
+    def _on_release(self, event) -> None:
+        # 記錄註記資料：(canvas item ids, 合成用資料) — 在視窗銷毀前抓取，避免 destroy 後不能讀取 canvas
+        ann_data = []
+        for item in self.draw_items:
+            item_type = self.canvas.type(item)
+            coords = tuple(self.canvas.coords(item))
+            fill = self.canvas.itemcget(item, "fill")
+            width = int(float(self.canvas.itemcget(item, "width") or 1))
+            ann_data.append((item_type, coords, fill, width))
+        self.all_annotations.append((list(self.draw_items), ann_data))
+
+    def _undo(self) -> None:
+        """復原最後一筆註記。"""
+        if self.all_annotations:
+            item_ids, _ = self.all_annotations.pop()
+            for item in item_ids:
+                self.canvas.delete(item)
+
+    def _clear(self) -> None:
+        """清除全部註記。"""
+        for item_ids, _ in self.all_annotations:
+            for item in item_ids:
+                self.canvas.delete(item)
+        self.all_annotations.clear()
+
+    def _annotated_image(self):
+        """將註記資料合成到 PIL 圖片（不需存取已銷毀的 canvas）。"""
+        from PIL import Image, ImageDraw
+
+        img = self.image.convert("RGBA")
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+
+        def to_img(c: float) -> int:
+            return int(c / self.scale)
+
+        for _, ann_data in self.all_annotations:
+            for item_type, coords, fill, width in ann_data:
+                if item_type == "line":
+                    # 原子筆/螢光筆：連線段
+                    points = [(to_img(x), to_img(y)) for x, y in zip(coords[::2], coords[1::2])]
+                    if len(points) >= 2:
+                        # 螢光筆（寬線）用半透明
+                        alpha = 128 if width > 5 else 255
+                        color = fill + hex(alpha)[2:].zfill(2) if fill.startswith("#") else fill
+                        d.line(points, fill=color, width=max(1, int(width / self.scale)), joint="curve")
+                elif item_type == "rectangle":
+                    x1, y1, x2, y2 = coords
+                    d.rectangle(
+                        [to_img(x1), to_img(y1), to_img(x2), to_img(y2)],
+                        outline=fill, width=max(1, int(width / self.scale)),
+                    )
+
+        return Image.alpha_composite(img, overlay).convert("RGB")
 
     def _save(self) -> None:
         self.choice = "save"
@@ -230,14 +535,14 @@ class ScreenshotApp:
 
         # 狀態標籤
         self.status_var = tk.StringVar(value="就緒")
-        status = tk.Label(root, textvariable=self.status_var, font=("Arial", 14))
+        status = tk.Label(root, textvariable=self.status_var, font=("Microsoft YaHei UI", 14))
         status.pack(pady=(16, 8))
 
         # 截圖按鈕
         btn = tk.Button(
             root,
             text="📸 截圖",
-            font=("Arial", 22),
+            font=("Microsoft YaHei UI", 22),
             width=12,
             height=3,
             command=self.start_capture,
@@ -247,15 +552,15 @@ class ScreenshotApp:
         # 輸出目錄欄位 + 瀏覽按鈕
         dir_frame = tk.Frame(root)
         dir_frame.pack(fill="x", padx=16, pady=(4, 2))
-        tk.Label(dir_frame, text="輸出目錄:", font=("Arial", 10)).pack(side="left")
+        tk.Label(dir_frame, text="輸出目錄:", font=("Microsoft YaHei UI", 10)).pack(side="left")
         self.dir_var = tk.StringVar(value=str(self.out_dir))
-        dir_entry = tk.Entry(dir_frame, textvariable=self.dir_var, font=("Arial", 9), width=28)
+        dir_entry = tk.Entry(dir_frame, textvariable=self.dir_var, font=("Microsoft YaHei UI", 9), width=28)
         dir_entry.pack(side="left", padx=6, fill="x", expand=True)
-        tk.Button(dir_frame, text="瀏覽…", font=("Arial", 10), command=self._browse_dir).pack(side="left")
+        tk.Button(dir_frame, text="瀏覽…", font=("Microsoft YaHei UI", 10), command=self._browse_dir).pack(side="left")
 
         # 最近截圖路徑顯示
         self.path_var = tk.StringVar(value="")
-        path_label = tk.Label(root, textvariable=self.path_var, font=("Arial", 9), fg="gray", wraplength=380)
+        path_label = tk.Label(root, textvariable=self.path_var, font=("Microsoft YaHei UI", 9), fg="gray", wraplength=380)
         path_label.pack(pady=(6, 12))
 
         # 設定視窗尺寸並置中
@@ -329,14 +634,34 @@ class ScreenshotApp:
                 save_config({"output_dir": str(self.out_dir)})
 
             out_path = self.out_dir / f"{timestamp_name()}.png"
-            image.save(out_path, "PNG")
+            # 儲存含註記的圖片
+            annotated = preview._annotated_image()
+            annotated.save(out_path, "PNG")
 
             import pyperclip
+            from PIL import ImageTk
 
             path_text = str(out_path)
-            pyperclip.copy(path_text)
+            mode = getattr(preview, "clipboard_mode", None)
+            clipboard_mode = mode.get() if mode else "path"
 
-            self.status_var.set("已儲存，路徑已複製")
+            self.root.clipboard_clear()
+            if clipboard_mode == "image":
+                try:
+                    photo = ImageTk.PhotoImage(annotated)
+                    self._clipboard_photo = photo  # 保持參考避免被 GC
+                    self.root.clipboard_append(photo, type="image")
+                    self.status_var.set("已儲存，圖片已複製到剪貼簿")
+                except tk.TclError:
+                    # fallback: 複製路徑
+                    self.root.clipboard_append(path_text)
+                    self.status_var.set("已儲存，路徑已複製 (圖片複製失敗)")
+            else:
+                # clipboard_mode == "path"
+                self.root.clipboard_append(path_text)
+                pyperclip.copy(path_text)
+                self.status_var.set("已儲存，路徑已複製")
+
             self.path_var.set(path_text)
             return
 
