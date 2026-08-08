@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import sys
 import tkinter as tk
 from pathlib import Path
 
@@ -224,6 +225,9 @@ class ScreenshotApp:
         root.resizable(False, False)
         root.attributes("-topmost", True)
 
+        # 設定視窗/工作列 icon（PyInstaller 打包後用 _MEIPASS 找 icon）
+        self._set_window_icon(root)
+
         # 狀態標籤
         self.status_var = tk.StringVar(value="就緒")
         status = tk.Label(root, textvariable=self.status_var, font=("Arial", 14))
@@ -261,6 +265,17 @@ class ScreenshotApp:
         x = (root.winfo_screenwidth() - w) // 2
         y = (root.winfo_screenheight() - h) // 3
         root.geometry(f"+{x}+{y}")
+
+    def _set_window_icon(self, root: tk.Tk) -> None:
+        """設定視窗/工作列 icon。"""
+        try:
+            # PyInstaller 打包時 icon 複製到 _MEIPASS；一般執行時在專案目錄
+            base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+            icon_path = base / "pathshot_icon.ico"
+            if icon_path.exists():
+                root.iconbitmap(str(icon_path))
+        except (tk.TclError, OSError):
+            pass  # icon 設定失敗不影響功能
 
     def _browse_dir(self) -> None:
         """開啟目錄選擇對話框，並記住選的路徑。"""
