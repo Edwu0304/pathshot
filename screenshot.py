@@ -252,10 +252,11 @@ class PreviewWindow:
     PEN_COLORS = ["#ff0000", "#0000ff", "#000000", "#ffff00", "#ffffff"]  # 紅/藍/黑/黃/白
     HL_COLORS = ["#ffff00", "#00ff00"]  # 黃/綠
 
-    def __init__(self, master: tk.Tk, image, region: tuple[int, int, int, int]) -> None:
+    def __init__(self, master: tk.Tk, image, region: tuple[int, int, int, int], out_dir: Path) -> None:
         self.master = master
         self.image = image
         self.region = region
+        self.out_dir = out_dir
         self.choice: str | None = None  # "save" / "retake" / "cancel"
         self.zoom = 1.4  # 縮放係數（1.0 = 原始適配）
 
@@ -273,9 +274,9 @@ class PreviewWindow:
         img_w, img_h = self.image.size
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
-        # 預留工具列/資訊列/操作列高度，避免視窗超出螢幕導致按鈕或內容被切掉
+        # 預留工具列/資訊列/存檔目錄列/操作列高度，避免視窗超出螢幕導致按鈕或內容被切掉
         max_canvas_w = min(1000, screen_w - 40)
-        max_canvas_h = min(650, screen_h - 230)
+        max_canvas_h = min(650, screen_h - 270)
         base_scale = min(1.0, max_canvas_w / img_w, max_canvas_h / img_h)
         self.scale = base_scale * self.zoom
         disp_w = int(img_w * self.scale)
@@ -321,6 +322,15 @@ class PreviewWindow:
         # 操作列 — 左邊主要動作，右邊剪貼簿說明
         bfont = ("Microsoft YaHei UI", int(13 * self.zoom))
         fs_small = ("Microsoft YaHei UI", int(10 * self.zoom))
+
+        # 存檔目錄列：顯示/更改這次截圖要存的位置
+        dir_frame = tk.Frame(self.win)
+        dir_frame.pack(padx=12, pady=(2, 0), fill="x")
+        tk.Label(dir_frame, text="存檔目錄:", font=fs_small, fg="#475569").pack(side="left")
+        self.save_dir_var = tk.StringVar(value=str(self.out_dir))
+        dir_entry = tk.Entry(dir_frame, textvariable=self.save_dir_var, font=fs_small)
+        dir_entry.pack(side="left", padx=6, fill="x", expand=True)
+        tk.Button(dir_frame, text="瀏覽…", font=fs_small, command=self._browse_save_dir).pack(side="left")
 
         action_row = tk.Frame(self.win)
         action_row.pack(pady=14, padx=8, fill="x")
@@ -608,6 +618,15 @@ class PreviewWindow:
         self.choice = "save"
         self.win.destroy()
 
+    def _browse_save_dir(self) -> None:
+        """開啟目錄選擇對話框，更新這次截圖的存檔目錄。"""
+        from tkinter import filedialog
+
+        initial = str(self.save_dir_var.get()).strip() or str(self.out_dir)
+        chosen = filedialog.askdirectory(initialdir=initial, title="選擇截圖輸出目錄")
+        if chosen:
+            self.save_dir_var.set(chosen)
+
     def _retake(self) -> None:
         self.choice = "retake"
         self.win.destroy()
@@ -727,7 +746,9 @@ class ScreenshotApp:
             self.root.deiconify()
             self.root.lift()
 
-            preview = PreviewWindow(self.root, image, region)
+            # 預覽視窗顯示目前輸出目錄（支援在此直接更改）
+            current_dir = str(self.dir_var.get()).strip() or str(self.out_dir)
+            preview = PreviewWindow(self.root, image, region, Path(current_dir))
             choice = preview.run()
 
             if choice == "retake":
@@ -737,11 +758,12 @@ class ScreenshotApp:
                 return
 
             # choice == "save"
-            # 同步目前 UI 欄位顯示的輸出目錄（支援手動編輯）
-            current_dir = str(self.dir_var.get()).strip()
+            # 以預覽視窗的存檔目錄為準（使用者可能在預覽時改過），同步主視窗與設定檔
+            current_dir = str(preview.save_dir_var.get()).strip()
             if current_dir:
                 self.out_dir = Path(current_dir)
                 self.out_dir.mkdir(parents=True, exist_ok=True)
+                self.dir_var.set(str(self.out_dir))
                 save_config({"output_dir": str(self.out_dir)})
 
             out_path = self.out_dir / f"{timestamp_name()}.png"
