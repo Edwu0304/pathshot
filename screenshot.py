@@ -98,7 +98,7 @@ def copy_image_to_clipboard(image: Image.Image) -> None:
     finally:
         user32.CloseClipboard()
 
-DEFAULT_OUT_DIR = Path(r"D:\repo\Others\screenshot\Source")
+DEFAULT_OUT_DIR = Path(r"D:\repo\Others\pathshot\Source")
 
 
 def _config_dir() -> Path:
