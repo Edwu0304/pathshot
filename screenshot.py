@@ -25,6 +25,27 @@ CF_DIB = 8
 GMEM_MOVEABLE = 0x0002
 
 
+def enable_dpi_awareness() -> None:
+    """讓 tkinter 使用實體像素，與 mss 擷取的座標一致。
+
+    Windows 顯示縮放 ≠100%（例如 125%）時，未宣告 DPI-aware 的程式會被虛擬化：
+    tkinter 的座標/視窗尺寸是「邏輯像素」（1536×864），而 mss 用 GDI 抓的是
+    「實體像素」（1920×1080）。兩者混用會讓框選區域換算錯誤，導致截圖尺寸不對、
+    右/下內容被切掉。必須在建立 tk.Tk() 之前呼叫。
+    """
+    try:
+        # PER_MONITOR_DPI_AWARE：每個螢幕各自對應實體像素（多螢幕不同縮放也正確）
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        # 舊版 Windows 備援：SYSTEM_DPI_AWARE
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def copy_image_to_clipboard(image: Image.Image) -> None:
     """把 PIL Image 以 CF_DIB (24bpp BMP) 寫入 Windows 剪貼簿。
 
@@ -78,7 +99,20 @@ def copy_image_to_clipboard(image: Image.Image) -> None:
         user32.CloseClipboard()
 
 DEFAULT_OUT_DIR = Path(r"D:\repo\Others\screenshot\Source")
-CONFIG_PATH = Path(__file__).parent / "screenshot_config.json"
+
+
+def _config_dir() -> Path:
+    """設定檔位置：exe 用 exe 所在目錄（可攜帶），source 用專案目錄。
+
+    PyInstaller onefile 的 __file__ 指向 _MEI 暫存解壓目錄，程式退出即刪除；
+    放那裡的 config 會每次重開都「消失」，記不住上次的存檔目錄。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+CONFIG_PATH = _config_dir() / "screenshot_config.json"
 
 
 def load_config() -> dict:
@@ -157,8 +191,12 @@ class RegionSelector:
         self.canvas.tag_raise(self.size_text)
 
     def _on_press(self, event) -> None:
-        self.start_x = event.x_root
-        self.start_y = event.y_root
+        # canvas 座標（畫框用）與螢幕座標（mss 擷取用）分開記錄：
+        # fullscreen 視窗在非主螢幕時原點 ≠ 螢幕原點，混用會把框畫錯位置
+        self.start_canvas_x = event.x
+        self.start_canvas_y = event.y
+        self.start_root_x = event.x_root
+        self.start_root_y = event.y_root
         self.rect = self.canvas.create_rectangle(
             event.x, event.y, event.x, event.y,
             outline="#1a1a4a",  # 深藍黑，明顯易辨識
@@ -168,14 +206,14 @@ class RegionSelector:
 
     def _on_drag(self, event) -> None:
         if self.rect is not None:
-            self.canvas.coords(self.rect, self.start_x, self.start_y, event.x_root, event.y_root)
+            self.canvas.coords(self.rect, self.start_canvas_x, self.start_canvas_y, event.x, event.y)
             self._update_size_label()
 
     def _on_release(self, event) -> None:
-        left = min(self.start_x, event.x_root)
-        top = min(self.start_y, event.y_root)
-        right = max(self.start_x, event.x_root)
-        bottom = max(self.start_y, event.y_root)
+        left = min(self.start_root_x, event.x_root)
+        top = min(self.start_root_y, event.y_root)
+        right = max(self.start_root_x, event.x_root)
+        bottom = max(self.start_root_y, event.y_root)
         width = right - left
         height = bottom - top
         if width > 0 and height > 0:
@@ -231,12 +269,24 @@ class PreviewWindow:
         self.win.title("截圖預覽")
         self.win.attributes("-topmost", True)
 
-        # 縮放顯示（zoom 倍率，限制最大 1000x650 * zoom）
+        # 縮放顯示（zoom 倍率，限制最大 1000x650 * zoom，且不超過螢幕）
         img_w, img_h = self.image.size
-        base_scale = min(1.0, 1000 / img_w, 650 / img_h)
+        screen_w = self.win.winfo_screenwidth()
+        screen_h = self.win.winfo_screenheight()
+        # 預留工具列/資訊列/操作列高度，避免視窗超出螢幕導致按鈕或內容被切掉
+        max_canvas_w = min(1000, screen_w - 40)
+        max_canvas_h = min(650, screen_h - 230)
+        base_scale = min(1.0, max_canvas_w / img_w, max_canvas_h / img_h)
         self.scale = base_scale * self.zoom
-        self.disp_w = max(1, int(img_w * self.scale))
-        self.disp_h = max(1, int(img_h * self.scale))
+        disp_w = int(img_w * self.scale)
+        disp_h = int(img_h * self.scale)
+        # zoom 後若超出螢幕，降到恰好放得下（scale 同步修正，註記換算才正確）
+        if disp_w > max_canvas_w or disp_h > max_canvas_h:
+            self.scale = min(max_canvas_w / img_w, max_canvas_h / img_h)
+            disp_w = int(img_w * self.scale)
+            disp_h = int(img_h * self.scale)
+        self.disp_w = max(1, disp_w)
+        self.disp_h = max(1, disp_h)
 
         from PIL import ImageTk
 
@@ -728,6 +778,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="UI 版區域截圖工具")
     parser.add_argument("--out", default=str(DEFAULT_OUT_DIR), help="輸出目錄")
     args = parser.parse_args()
+
+    # 必須在建立 Tk 之前設定 DPI-aware，否則 125% 縮放下 tkinter 與 mss 像素不一致
+    enable_dpi_awareness()
 
     root = tk.Tk()
     ScreenshotApp(root, Path(args.out))
