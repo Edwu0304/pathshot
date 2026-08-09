@@ -10,11 +10,72 @@ UI 版區域截圖工具。
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.wintypes as wt
 import datetime
 import json
+import struct
 import sys
 import tkinter as tk
 from pathlib import Path
+
+from PIL import Image
+
+CF_DIB = 8
+GMEM_MOVEABLE = 0x0002
+
+
+def copy_image_to_clipboard(image: Image.Image) -> None:
+    """把 PIL Image 以 CF_DIB (24bpp BMP) 寫入 Windows 剪貼簿。
+
+    tkinter 的 clipboard_append(photo) 只註冊 Tk 私有格式，其他程式讀不到；
+    這裡直接用 ctypes 寫標準 DIB，任何支援貼圖的程式都能貼。
+    """
+    img = image.convert("RGB")
+    w, h = img.size
+    row_size = ((w * 3 + 3) // 4) * 4  # 每列 4-byte 對齊
+    header_size = 40  # BITMAPINFOHEADER
+    total = header_size + row_size * h
+    buf = ctypes.create_string_buffer(total)
+
+    struct.pack_into(
+        "<IiiHHIIiiII", buf, 0,
+        header_size, w, h, 1, 24, 0, row_size * h, 2835, 2835, 0, 0,
+    )
+
+    # PIL 的 raw "BGR" 是 top-down；DIB 需要 bottom-up（最後一列放最前面）
+    bgr = img.tobytes("raw", "BGR")
+    pad = b"\x00" * (row_size - w * 3)
+    pixels = b"".join(bgr[i * w * 3:(i + 1) * w * 3] + pad for i in range(h - 1, -1, -1))
+    ctypes.memmove(ctypes.addressof(buf) + header_size, pixels, len(pixels))
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    user32.OpenClipboard.argtypes = [wt.HWND]
+    user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+    kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wt.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+    kernel32.GlobalLock.restype = wt.LPVOID
+    kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+
+    if not user32.OpenClipboard(None):
+        raise OSError("OpenClipboard 失敗")
+    try:
+        user32.EmptyClipboard()
+        hglobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, total)
+        if not hglobal:
+            raise OSError("GlobalAlloc 失敗")
+        dst = kernel32.GlobalLock(hglobal)
+        try:
+            ctypes.memmove(dst, buf, total)
+        finally:
+            kernel32.GlobalUnlock(hglobal)
+        # 交給系統管理，之後不要 GlobalFree
+        if not user32.SetClipboardData(CF_DIB, hglobal):
+            raise OSError("SetClipboardData 失敗")
+    finally:
+        user32.CloseClipboard()
 
 DEFAULT_OUT_DIR = Path(r"D:\repo\Others\screenshot\Source")
 CONFIG_PATH = Path(__file__).parent / "screenshot_config.json"
@@ -639,7 +700,6 @@ class ScreenshotApp:
             annotated.save(out_path, "PNG")
 
             import pyperclip
-            from PIL import ImageTk
 
             path_text = str(out_path)
             mode = getattr(preview, "clipboard_mode", None)
@@ -648,11 +708,9 @@ class ScreenshotApp:
             self.root.clipboard_clear()
             if clipboard_mode == "image":
                 try:
-                    photo = ImageTk.PhotoImage(annotated)
-                    self._clipboard_photo = photo  # 保持參考避免被 GC
-                    self.root.clipboard_append(photo, type="image")
+                    copy_image_to_clipboard(annotated)
                     self.status_var.set("已儲存，圖片已複製到剪貼簿")
-                except tk.TclError:
+                except OSError:
                     # fallback: 複製路徑
                     self.root.clipboard_append(path_text)
                     self.status_var.set("已儲存，路徑已複製 (圖片複製失敗)")
